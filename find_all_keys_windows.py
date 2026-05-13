@@ -30,24 +30,28 @@ class MBI(ctypes.Structure):
 
 
 def get_pids():
-    """返回所有 Weixin.exe 进程的 (pid, mem_kb) 列表，按内存降序"""
+    """返回所有微信进程的 (pid, mem_kb) 列表，按内存降序。
+    WeChat 4.0 使用 WeChatAppEx.exe，旧版本使用 Weixin.exe。
+    """
     import subprocess
-    r = subprocess.run(["tasklist", "/FI", "IMAGENAME eq Weixin.exe", "/FO", "CSV", "/NH"],
-                       capture_output=True, text=True)
+    process_names = ["Weixin.exe", "WeChat.exe", "WeChatAppEx.exe"]
     pids = []
-    for line in r.stdout.strip().split('\n'):
-        if not line.strip():
-            continue
-        p = line.strip('"').split('","')
-        if len(p) >= 5:
-            pid = int(p[1])
-            mem = int(p[4].replace(',', '').replace(' K', '').strip() or '0')
-            pids.append((pid, mem))
+    for proc_name in process_names:
+        r = subprocess.run(["tasklist", "/FI", f"IMAGENAME eq {proc_name}", "/FO", "CSV", "/NH"],
+                           capture_output=True, text=True)
+        for line in r.stdout.strip().split('\n'):
+            if not line.strip():
+                continue
+            p = line.strip('"').split('","')
+            if len(p) >= 5:
+                pid = int(p[1])
+                mem = int(p[4].replace(',', '').replace(' K', '').strip() or '0')
+                pids.append((pid, mem, proc_name))
     if not pids:
-        raise RuntimeError("Weixin.exe 未运行")
+        raise RuntimeError("未找到微信进程 (Weixin.exe 或 WeChatAppEx.exe)，请确保微信已启动并登录")
     pids.sort(key=lambda x: x[1], reverse=True)
-    for pid, mem in pids:
-        print(f"[+] Weixin.exe PID={pid} ({mem // 1024}MB)")
+    for pid, mem, proc_name in pids:
+        print(f"[+] {proc_name} PID={pid} ({mem // 1024}MB)")
     return pids
 
 
@@ -101,10 +105,10 @@ def main():
     all_hex_matches = 0
     t0 = time.time()
 
-    for pid, mem_kb in pids:
+    for pid, mem_kb, proc_name in pids:
         h = kernel32.OpenProcess(0x0010 | 0x0400, False, pid)
         if not h:
-            print(f"[WARN] 无法打开进程 PID={pid}，跳过")
+            print(f"[WARN] 无法打开进程 {proc_name} PID={pid}，跳过")
             continue
 
         try:

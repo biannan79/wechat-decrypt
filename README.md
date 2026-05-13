@@ -50,9 +50,9 @@ macOS：
 - macOS 10.15+（Apple Silicon / Intel 均可）
 - 微信 4.x（macOS 版）
 - Xcode Command Line Tools：`xcode-select --install`
-- 需要对 `/Applications/WeChat.app` 做 ad-hoc 重签名（允许进程内存读取），重签名前须先退出微信
+- 需要对 `/Applications/WeChat.app` 做 ad-hoc 重签名（允许进程内存读取）
 - 需要 root 权限运行扫描器
-- `db_dir` 默认类似 `~/Library/Containers/com.tencent.xinWeChat/Data/Documents/xwechat_files/<wxid>/db_storage`
+- `db_dir` 默认类似 `~/Library/Containers/com.tencent.xinWeChat/Data/Library/Application Support/com.tencent.xinWeChat/2.0b4.0.9/<hash>/Message`
 
 ### 安装依赖
 
@@ -60,43 +60,13 @@ macOS：
 pip install -r requirements.txt
 ```
 
-<details>
-<summary>⚠️ 安装失败？点击展开常见问题</summary>
-
-**问题：`error: externally-managed-environment` (PEP 668)**
-
-Homebrew Python (3.12+) 和部分 Linux 发行版禁止 `pip install` 直接写入系统 Python 环境，会报此错误。
-
-**解决：使用虚拟环境**
-
-```bash
-python3 -m venv .venv
-source .venv/bin/activate   # 激活虚拟环境
-pip install -r requirements.txt
-
-# 后续运行脚本时使用 .venv 中的 Python
-.venv/bin/python3 main.py
-.venv/bin/python3 decrypt_db.py
-```
-
-或使用 Makefile（已配置 `.venv/bin/python3`）：
-
-```bash
-make decrypt  # 等价于 .venv/bin/python3 main.py decrypt
-make web      # 等价于 .venv/bin/python3 main.py
-```
-
----
-
-**Windows 权限不足或全局环境不可写**，可以改用：
+Windows 如果遇到权限不足或全局环境不可写，可以改用：
 
 ```bash
 py -m pip install --user -r requirements.txt
 ```
 
 如果需要读取受保护的进程或把依赖安装到系统 Python，也可能需要以管理员身份打开终端。
-
-</details>
 
 ### 快速开始
 
@@ -116,11 +86,10 @@ python3 main.py decrypt
 macOS（密钥扫描用 C 版本，见下文 [macOS 数据库密钥扫描](#macos-数据库密钥扫描-wechat-4x) 章节）：
 
 ```bash
-# 1. 退出微信，重新签名（首次及微信升级后各一次）
-killall WeChat
+# 1. 重新签名（首次及微信升级后各一次）
 sudo codesign --force --deep --sign - /Applications/WeChat.app
 
-# 2. 重新打开微信并登录，然后编译并运行扫描器
+# 2. 编译并运行扫描器
 cc -O2 -o find_all_keys_macos find_all_keys_macos.c -framework Foundation
 sudo ./find_all_keys_macos
 
@@ -155,14 +124,14 @@ macOS 版 `config.json` 示例：
 
 ```json
 {
-    "db_dir": "/Users/yourname/Library/Containers/com.tencent.xinWeChat/Data/Documents/xwechat_files/your_wxid/db_storage",
+    "db_dir": "/Users/yourname/Library/Containers/com.tencent.xinWeChat/Data/Library/Application Support/com.tencent.xinWeChat/2.0b4.0.9/<hash>/Message",
     "keys_file": "all_keys.json",
     "decrypted_dir": "decrypted",
     "wechat_process": "WeChat"
 }
 ```
 
-`db_dir` 路径：Windows 可在微信设置 → 文件管理中找到；Linux 默认在 `~/Documents/xwechat_files/<wxid>/db_storage`；macOS 在 `~/Library/Containers/com.tencent.xinWeChat/Data/Documents/xwechat_files/<wxid>/db_storage`（程序已支持自动检测）。
+`db_dir` 路径：Windows 可在微信设置 → 文件管理中找到；Linux 默认在 `~/Documents/xwechat_files/<wxid>/db_storage`；macOS 在 `~/Library/Containers/com.tencent.xinWeChat/.../Message`（`<hash>` 是微信随机生成的账号目录）。
 
 ### Web UI 说明
 
@@ -227,55 +196,16 @@ claude mcp add wechat -- python C:\Users\你的用户名\wechat-decrypt\mcp_serv
 | `get_contact_tags()` | 列出所有联系人标签及成员数量 |
 | `get_tag_members(tag_name)` | 获取指定标签下的所有联系人，支持模糊匹配 |
 | `get_new_messages()` | 获取自上次调用以来的新消息 |
-| `get_voice_messages(chat_name)` | 列出某会话所有语音消息（local_id、时长、时间戳） |
-| `decode_voice(chat_name, local_id)` | 解码 SILK 语音为本地 WAV 文件 |
-| `transcribe_voice(chat_name, local_id)` | 转录语音为文字（自动检测语言） |
 
 前置条件：需要先运行 `python main.py` 或 `python find_all_keys.py` 完成密钥提取。
 
 说明：`search_messages` 的 `limit` 最大为 `500`；`get_chat_history` 支持更大的 `limit`，但消息很多时仍建议配合 `offset` 分页读取。
 
-#### ⚠️ 语音转录隐私
-
-`transcribe_voice` 默认使用本地 Whisper（CPU），数据全程留在本机。`transcribe_chat.py` 批量 CLI 共享同一份配置。
-
-如需切换到 OpenAI Whisper API（更快、Mandarin 精度更高），在 `config.json` 中：
-
-```json
-{
-    "transcription_backend": "openai",
-    "openai_api_key": "sk-..."
-}
-```
-
-启用后**语音文件会上传至 OpenAI 服务器**进行转录。需 `pip install openai`。
-
-- 成本：约 $0.006 / 分钟（OpenAI 计价）
-- 文件 > 25MB 在上传前被拒绝（OpenAI 上限）
-
-如需切换到 whisper.cpp 后端（macOS Metal GPU 加速，3-5x 更快），在 `config.json` 中：
-
-```json
-{
-    "transcription_backend": "whisper_cpp"
-}
-```
-
-数据全程留在本机，不上传。需要 `brew install whisper-cpp` 并下载模型（自动检测常见路径，或通过 `whisper_cpp_binary` / `whisper_cpp_model` 指定）。
-
-所有后端共用以下行为：
-- 首次启用 openai 或 whisper_cpp 后端时 stderr 会打一行警告
-- openai: `openai_api_key` 缺失时静默回退 local
-- whisper_cpp: 二进制文件未找到时静默回退 local
-- 切换后端后，旧缓存条目（backend 不匹配）自动重新转录
-
 **[查看使用案例 →](USAGE.md)**
 
 ### 图片解密 (V2 格式)
 
-微信 4.0 (2025-08+) 的 .dat 图片文件使用 AES-128-ECB + XOR 混合加密 (V2 格式)。AES 密钥的获取方式因平台而异：
-
-**Windows / Linux**（从进程内存扫描）：
+微信 4.0 (2025-08+) 的 .dat 图片文件使用 AES-128-ECB + XOR 混合加密 (V2 格式)。AES 密钥需要从运行中的微信进程内存中提取：
 
 ```bash
 # 1. 在微信中打开查看 2-3 张图片（点击看大图）
@@ -286,19 +216,9 @@ python find_image_key_monitor.py
 python find_image_key.py
 ```
 
-> AES 密钥仅在微信查看图片时临时加载到内存中。如果扫描未找到密钥，请先在微信中查看几张图片，然后立即重新运行脚本。
+密钥会自动保存到 `config.json` 的 `image_aes_key` 字段。之后 `monitor_web.py` 启动时会自动加载密钥，图片消息将显示内联预览。
 
-**macOS**（从磁盘 kvcomm 缓存派生，**无需扫描进程内存**）：
-
-```bash
-python find_image_key_macos.py
-```
-
-无需提前在微信中查看图片，无需 root 权限，无需重签名。脚本会扫描 `~/Library/Containers/com.tencent.xinWeChat/.../app_data/net/kvcomm/key_*.statistic` 文件名提取派生码 `code`，配合 `db_dir` 路径里的 wxid，按 `aes_key = MD5(str(code) + cleaned_wxid)[:16]` / `xor_key = code & 0xFF` 的规则推算密钥，并用一张 V2 `_t.dat` 缩略图做 AES 模板验证。解决 [issue #23](https://github.com/ylytdeng/wechat-decrypt/issues/23)（macOS 内存扫描器 197K 候选全部失败）。
-
-派生算法的发现归功于 [@hicccc77](https://github.com/hicccc77) 在 issue #23 的[评论](https://github.com/ylytdeng/wechat-decrypt/issues/23)，参考实现见其 [WeFlow 项目](https://github.com/hicccc77/WeFlow/blob/dev/electron/services/keyServiceMac.ts)（CC BY-NC-SA 4.0）。本仓库的 `find_image_key_macos.py` 是基于该算法的独立 Python clean-room 实现。
-
-密钥会自动保存到 `config.json` 的 `image_aes_key` / `image_xor_key` 字段。之后 `monitor_web.py` 启动时会自动加载，图片消息将显示内联预览。
+> **注意**: AES 密钥仅在微信查看图片时临时加载到内存中。如果扫描未找到密钥，请先在微信中查看几张图片，然后立即重新运行脚本。
 
 ## 文件说明
 
@@ -314,9 +234,8 @@ python find_image_key_macos.py
 | `monitor_web.py` | 实时消息监听 (Web UI + SSE + 图片预览) |
 | `monitor.py` | 实时消息监听 (命令行) |
 | `decode_image.py` | 图片 .dat 文件解密模块 (XOR / V1 / V2) |
-| `find_image_key.py` | 从微信进程内存提取图片 AES 密钥（Windows / Linux） |
-| `find_image_key_monitor.py` | 持续监控版密钥提取（Windows / Linux，推荐） |
-| `find_image_key_macos.py` | macOS 版图片密钥派生（从磁盘 kvcomm 缓存推算，无需扫描内存） |
+| `find_image_key.py` | 从微信进程内存提取图片 AES 密钥 |
+| `find_image_key_monitor.py` | 持续监控版密钥提取（推荐） |
 | `latency_test.py` | 延迟测量诊断工具 |
 | `find_all_keys_macos.c` | macOS 版内存密钥扫描器 (C, Mach VM API) |
 
@@ -380,54 +299,6 @@ sudo ./find_all_keys_macos <pid>
 ```bash
 python3 decrypt_db.py
 ```
-
-### 常见问题
-
-#### `task_for_pid failed: 5`
-
-以 root 运行扫描器后仍报此错，说明微信进程的 Hardened Runtime 签名未移除。
-
-**原因**：macOS 会阻止对带有 Hardened Runtime 标志的进程进行内存读取，即使以 root 身份运行也不行。微信默认签名包含此标志。
-
-**排查步骤**：
-
-```bash
-# 1. 检查微信当前签名（如包含 flags=0x10000(runtime) 则需要重签名）
-codesign -dvvv /Applications/WeChat.app 2>&1 | grep flags
-
-# 2. 必须先退出微信再重签名（微信在运行时重签名不会生效）
-killall WeChat
-sudo codesign --force --deep --sign - /Applications/WeChat.app
-
-# 3. 验证签名已变更（应显示 flags=0x2，不再有 runtime 标志）
-codesign -dvvv /Applications/WeChat.app 2>&1 | grep flags
-
-# 4. 重新打开微信并登录，然后运行扫描器
-sudo ./find_all_keys_macos
-```
-
-**注意**：
-- 微信每次更新后签名会恢复原始状态，需重新执行上述步骤
-- `--deep` 参数确保签名覆盖 App Bundle 内所有嵌套二进制文件
-- 重签名后必须重启微信，否则进程仍使用旧的签名凭证
-
-#### 未能自动检测微信数据目录
-
-程序已支持 macOS 自动检测微信数据目录。如果检测失败，手动查找并配置：
-
-```bash
-# 搜索 db_storage 目录
-find ~/Library/Containers/com.tencent.xinWeChat -type d -name "db_storage" 2>/dev/null
-```
-
-如有多个账号（多个 `db_storage` 目录），按修改时间判断当前活跃账号：
-
-```bash
-stat -f "%m %N" /path/to/account1/db_storage /path/to/account2/db_storage
-# 数值更大 = 最近活跃
-```
-
-然后编辑 `config.json`，将找到的路径填入 `db_dir` 字段。
 
 ## 免责声明
 

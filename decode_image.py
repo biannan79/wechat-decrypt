@@ -118,7 +118,7 @@ def v2_decrypt_file(dat_path, out_path=None, aes_key=None, xor_key=0x88):
         dat_path: V2 .dat 文件路径
         out_path: 输出路径 (None 则自动命名)
         aes_key: 16 字节 AES key (bytes 或 str)
-        xor_key: XOR key (int 或可被 int(_, 0) 解析的 str, 默认 0x88)
+        xor_key: XOR key (int, 默认 0x88)
 
     Returns:
         (output_path, format) 或 (None, None)
@@ -134,10 +134,6 @@ def v2_decrypt_file(dat_path, out_path=None, aes_key=None, xor_key=0x88):
         aes_key = aes_key.encode('ascii')[:16]
     if len(aes_key) < 16:
         return None, None
-
-    # 与 aes_key 的 str→bytes 处理对称: 允许 config.json 写 "0x88" / "136" 等字符串形式
-    if isinstance(xor_key, str):
-        xor_key = int(xor_key, 0)
 
     with open(dat_path, 'rb') as f:
         data = f.read()
@@ -189,22 +185,6 @@ def v2_decrypt_file(dat_path, out_path=None, aes_key=None, xor_key=0x88):
     # wxgf (HEVC 裸流) 格式
     if decrypted[:4] == b'wxgf':
         fmt = 'hevc'
-    elif fmt == 'bin':
-        # detect_image_format 返回 'bin' = magic 不匹配任何已知图片格式,
-        # 通常说明 AES key 错(解密后产生随机字节)。拒绝写出无意义的 .bin
-        # 垃圾文件,让 caller 知道解密失败。
-        return None, None
-    elif xor_size >= 2:
-        # XOR key 错时 AES/raw 段可能产生合法 magic(看似正常 jpg/png 头),
-        # 但 XOR 段乱码。用尾部 magic 验证 XOR key 正确性:
-        # - JPG 必须以 FF D9 (EOI marker) 收尾
-        # - PNG 末尾 12 字节必须含 IEND chunk
-        # 其他格式 (gif/bmp/tif/webp/hevc) 缺乏强制 trailer signature,
-        # 不做校验以避免误杀。xor_size < 2 时无 XOR 段或样本过小,跳过。
-        if fmt == 'jpg' and decrypted[-2:] != b'\xff\xd9':
-            return None, None
-        if fmt == 'png' and b'IEND' not in decrypted[-12:]:
-            return None, None
 
     if out_path is None:
         base = os.path.splitext(dat_path)[0]
@@ -319,58 +299,34 @@ def extract_md5_from_packed_info(blob):
 class ImageResolver:
     """封装从 local_id 到图片文件的完整解析链"""
 
-    def __init__(self, wechat_base_dir, decoded_image_dir, cache, aes_key=None, xor_key=0x88):
+    def __init__(self, wechat_base_dir, decoded_image_dir, cache):
         """
         Args:
             wechat_base_dir: 微信数据根目录 (如 D:\\xwechat_files\\<wxid>)
             decoded_image_dir: 解密图片输出目录
             cache: DBCache 实例，用于解密 message_resource.db
-            aes_key: V2 格式的 AES key (16 字节 str/bytes)，None 表示不支持 V2 文件
-            xor_key: XOR key (int, 默认 0x88)，用于 V2 文件的 XOR 段
         """
         self.base_dir = wechat_base_dir
         self.attach_dir = os.path.join(wechat_base_dir, "msg", "attach")
         self.out_dir = decoded_image_dir
         self.cache = cache
-        self.aes_key = aes_key
-        self.xor_key = xor_key
 
-    def get_image_md5(self, username, local_id):
-        """通过 (username, local_id) 查 message_resource.db 获取图片 MD5
-
-        message_local_id 在 MessageResourceInfo 中跨 chat 重复 (不全局唯一),
-        必须用 chat_id 缩小范围;同一 chat 内活跃聊天也会复用 local_id
-        (实测最高同 chat 7 条同 local_id 的记录), 默认取最新一条。
-
-        message_local_type 上 32 bit 是版本/会话 flag, 用 % 2^32 取低位匹配
-        图片类型 3, 同 monitor_web.py 里 push 路径的写法。
-        """
+    def get_image_md5(self, local_id):
+        """通过 local_id 查 message_resource.db 获取图片文件 MD5"""
         path = self.cache.get("message/message_resource.db")
         if not path:
             return None
 
-        conn = sqlite3.connect(f"file:{path}?mode=ro", uri=True)
+        conn = sqlite3.connect(path)
         try:
-            chat_row = conn.execute(
-                "SELECT rowid FROM ChatName2Id WHERE user_name = ?",
-                (username,)
-            ).fetchone()
-            if not chat_row:
-                return None
-            chat_id = chat_row[0]
-
             row = conn.execute(
-                "SELECT packed_info FROM MessageResourceInfo "
-                "WHERE chat_id = ? AND message_local_id = ? "
-                "AND (message_local_type = 3 OR message_local_type % 4294967296 = 3) "
-                "ORDER BY message_create_time DESC LIMIT 1",
-                (chat_id, local_id)
+                "SELECT packed_info FROM MessageResourceInfo WHERE local_id = ?",
+                (local_id,)
             ).fetchone()
             if row and row[0]:
                 return extract_md5_from_packed_info(row[0])
-        except Exception as e:
-            print(f"[get_image_md5] {type(e).__name__}: {e}",
-                  file=sys.stderr, flush=True)
+        except Exception:
+            pass
         finally:
             conn.close()
 
@@ -401,10 +357,10 @@ class ImageResolver:
         Returns:
             dict with keys: success, path, format, md5, error
         """
-        # 1. 获取 MD5 (chat-scoped: 同 local_id 跨 chat 重复)
-        file_md5 = self.get_image_md5(username, local_id)
+        # 1. 获取 MD5
+        file_md5 = self.get_image_md5(local_id)
         if not file_md5:
-            return {'success': False, 'error': f'无法从 message_resource.db 找到 {username} local_id={local_id} 的图片信息'}
+            return {'success': False, 'error': f'无法从 message_resource.db 找到 local_id={local_id} 的图片信息'}
 
         # 2. 找 .dat 文件
         dat_files = self.find_dat_files(username, file_md5)
@@ -423,17 +379,13 @@ class ImageResolver:
                 selected = f
                 break
 
-        # 3. 解密 (decrypt_dat_file 会按 magic 自动分发 V2 / V1 / 老 XOR)
+        # 3. 解密
         out_name = f"{file_md5}"
         out_path_base = os.path.join(self.out_dir, out_name)
 
-        # 提前拦截以给出具体错误信息;否则会在 v2_decrypt_file 内 silent-fail 成笼统的"解密失败"
-        if is_v2_format(selected) and not self.aes_key:
-            return {'success': False, 'error': f'V2 格式 .dat 文件需要 AES key (文件: {selected})', 'md5': file_md5}
-
-        result_path, fmt = decrypt_dat_file(selected, f"{out_path_base}.tmp", self.aes_key, self.xor_key)
+        result_path, fmt = xor_decrypt_file(selected, f"{out_path_base}.tmp")
         if not result_path:
-            return {'success': False, 'error': f'解密失败 (文件: {selected})', 'md5': file_md5}
+            return {'success': False, 'error': f'无法检测 XOR key (文件: {selected})', 'md5': file_md5}
 
         # 重命名为正确扩展名
         final_path = f"{out_path_base}.{fmt}"
@@ -468,7 +420,7 @@ class ImageResolver:
 
         results = []
         for local_id, create_time in rows:
-            file_md5 = self.get_image_md5(username, local_id)
+            file_md5 = self.get_image_md5(local_id)
             info = {
                 'local_id': local_id,
                 'create_time': create_time,
